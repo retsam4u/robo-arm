@@ -27,9 +27,10 @@
 // ===================================================================
 struct RobotArm {
   int angle[6];  // angle of each servo
+  bool updated;
 };
 
-struct BtCommand {
+struct ServoCommand {
   uint8_t servo;  // 1..6
   char op;        // '+', '-', '='
   int value;      // 0..180 (or step)
@@ -45,11 +46,17 @@ Servo servos[6];
 // ===================================================================
 //   OOP Functions
 // ===================================================================
+void checkBluetooth(RobotArm &arm);
+bool readBtServoCommand(SoftwareSerial &bt, ServoCommand &outCmd);
+void sendRoboArmDataToBluetooth(SoftwareSerial &bt, RobotArm &arm);
+void checkIR(RobotArm &arm);
+void debugIR();
+bool readIrServoCommand(IRrecv &irReceiver, ServoCommand cmd);
+ServoCommand mapIrCommandToServoCommand(uint16_t irCommand);
+void handleServoCommand(RobotArm &arm, ServoCommand cmd);
+void checkAndApplyRobotArmState(RobotArm &arm, SoftwareSerial &bt);
 void setupServoMotors();
 void setServoAngles(RobotArm &arm);
-void handleCommand(RobotArm &arm, int command);
-void controlWithIR(RobotArm &arm, unsigned long irCode);
-void controlWithBluetooth(RobotArm &arm, char btChar);
 
 // ===================================================================
 //   STATIC FUNCTIONS
@@ -59,8 +66,6 @@ static inline int clampAngle(int a) {
   if (a > 180) return 180;
   return a;
 }
-
-
 
 // ===================================================================
 //   SETUP
@@ -94,153 +99,26 @@ void setup() {
 //   LOOP
 // ===================================================================
 void loop() {
-  checkBluetooth();
-  checkIR();
+  checkBluetooth(robotArm);
+  checkIR(robotArm);
+  checkAndApplyRobotArmState(robotArm, hc05);
   delay(15);
-}
-
-// ===================================================================
-//   Functions to check in loop
-// ===================================================================
-void checkBluetooth() {
-  // ------- CONTROL BLUETOOTH -------
-  BtCommand cmd;
-  if (readBtCommand(hc05, cmd)) {
-    uint8_t i = cmd.servo - 1;
-
-    if (cmd.op == '=') angle[i] = cmd.value;
-    else if (cmd.op == '+') angle[i] = angle[i] + cmd.value;
-    else if (cmd.op == '-') angle[i] = angle[i] - cmd.value;
-
-    angle[i] = clampAngle(angle[i]);
-    Serial.print("angle[");
-    Serial.print(i);
-    Serial.print("]=");
-    Serial.println(angle[i]);
-  }
-}
-
-void checkIR() {
-    // ------- CONTROL IR -------
-  if (IrReceiver.decode()) {
-    /*
-      * Print a summary of received data
-      */
-    if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
-        Serial.println(F("Received noise or an unknown (or not yet enabled) protocol"));
-        // We have an unknown protocol here, print extended info
-        IrReceiver.printIRResultRawFormatted(&Serial, true);
-
-        IrReceiver.resume(); // Do it here, to preserve raw data for printing with printIRResultRawFormatted()
-    } else {
-        IrReceiver.resume(); // Early enable receiving of the next IR frame
-
-        IrReceiver.printIRResultShort(&Serial);
-        IrReceiver.printIRSendUsage(&Serial);
-    }
-    Serial.println();
-
-    /*
-      * Finally, check the received data and perform actions according to the received command
-      */
-    if (IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT) {
-        Serial.println(F("Repeat received. Here you can repeat the same action as before."));
-    } else {
-        Serial.println("command!");
-        if (IrReceiver.decodedIRData.command == 0x10) {
-            Serial.println(F("Received command 0x10."));
-            // do something
-        } else if (IrReceiver.decodedIRData.command == 0x11) {
-            Serial.println(F("Received command 0x11."));
-            // do something else
-        }
-    }
-  }
-}
-
-// ===================================================================
-//   General function for command processing
-// ===================================================================
-void handleCommand(RobotArm &arm, int cmd) {
-  switch (cmd) {
-    case 10: // Servo 1: RESET
-      amr.angle[1] = 90;
-      break;
-    case 11: // Servo 1: -10deg
-      arm.angle[1] -= 10;
-      break;
-    case 12: // Servo 1: -5deg
-      arm.angle[1] -= 5;
-      break;
-    case 13: // Servo 1: +5deg
-      arm.angle[1] += 5;
-      break;
-    case 14: // Servo 1: +10deg
-      arm.angle[1] += 10;
-      break;
-  }
-
-  setServoAngles(arm);
-}
-
-// ===================================================================
-//   IR CONTROL
-// ===================================================================
-void controlWithIR(RobotArm &arm, unsigned long irCode) {
-  switch (irCode) {
-
-    case 0xFF629D:  // buton 1
-      handleCommand(arm, 0);
-      break;
-
-    case 0xFF22DD:  // buton 2
-      handleCommand(arm, 1);
-      break;
-
-    case 0xFF02FD:  // buton 3
-      handleCommand(arm, 2);
-      break;
-
-    default:
-      break;
-  }
 }
 
 // ===================================================================
 //   BLUETOOTH CONTROL
 // ===================================================================
-void controlWithBluetooth(RobotArm &arm, char btChar) {
-  if (btChar >= '0' && btChar <= '5') {
-    int index = btChar - '0';
-    handleCommand(arm, index);
+void checkBluetooth(RobotArm &arm) {
+  // ------- CONTROL BLUETOOTH -------
+  ServoCommand cmd;
+  if (readBtServoCommand(hc05, cmd)) {
+    handleServoCommand(arm, cmd);
   }
 }
 
-// ===================================================================
-//   SERVO FUNCTIONS
-// ===================================================================
-void setupServoMotors() {
-  int pins[] = SERVO_PINS;
-
-  for (int i = 0; i < 6; i++) {
-    servos[i].attach(pins[i]);
-    robotArm.angle[i] = 90;  // poziție inițială
-    servos[i].write(robotArm.angle[i]);
-  }
-}
-
-void setServoAngles(RobotArm &arm) {
-  for (int i = 0; i < 6; i++) {
-    servos[i].write(arm.angle[i]);
-  }
-}
-
-// ===================================================================
-//   BLUETOOTH FUNCTIONS
-// ===================================================================
 // Read from stream until we have a complete command like: >...<
 // Return true only when we have extracted a complete and valid command.
-bool readBtCommand(SoftwareSerial &bt, BtCommand &outCmd) {
+bool readBtServoCommand(SoftwareSerial &bt, ServoCommand &outCmd) {
   // Buffer for content between '>' and '<' (without delimitators)
   // Expected format: "4:+10" , "6:=90", "1:-5", "1:=42"
   // Format of readed chars is: >[servoIndex]:[operator][numericValue]<
@@ -323,4 +201,117 @@ bool readBtCommand(SoftwareSerial &bt, BtCommand &outCmd) {
   }
 
   return false; // we don't have yet a complete command
+}
+
+void sendRoboArmDataToBluetooth(SoftwareSerial &bt, RobotArm &arm) {
+  if (bt.availableForWrite() > 0) {
+    String data = "";
+    for (int servoIndex = 0; servoIndex < 6; servoIndex++) {
+      data = data + (servoIndex + 1) + "," + arm.angle[servoIndex] + (servoIndex == 5 ? "" : ";");
+    }
+    bt.print(data);
+  }
+}
+
+// ===================================================================
+//   IR CONTROL
+// ===================================================================
+void checkIR(RobotArm &arm) {
+    // ------- CONTROL IR -------
+  if (IrReceiver.decode()) {
+    // debugID();
+    ServoCommand cmd;
+    if (readIrServoCommand(IrReceiver, cmd)) {
+      handleServoCommand(arm, cmd);
+    }
+  }
+}
+
+void debugIR() {
+    /*
+      * Print a summary of received data
+      */
+    if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
+        Serial.println(F("Received noise or an unknown (or not yet enabled) protocol"));
+        // We have an unknown protocol here, print extended info
+        IrReceiver.printIRResultRawFormatted(&Serial, true);
+
+        IrReceiver.resume(); // Do it here, to preserve raw data for printing with printIRResultRawFormatted()
+    } else {
+        IrReceiver.resume(); // Early enable receiving of the next IR frame
+
+        IrReceiver.printIRResultShort(&Serial);
+        IrReceiver.printIRSendUsage(&Serial);
+    }
+    Serial.println();
+}
+
+bool readIrServoCommand(IRrecv &irReceiver, ServoCommand cmd) {
+    /*
+      * Check the received data and perform actions according to the received command
+      */
+    if (IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT) {
+        Serial.println(F("Repeat received. Here you can repeat the same action as before."));
+        return false;
+
+    } else {
+        Serial.print("IR command = ");
+        Serial.println(IrReceiver.decodedIRData.command);
+        cmd = ServoCommand{0, "", 0}; // mapIrCommandToServoCommand(IrReceiver.decodedIRData.command);
+        return cmd.servo > 0;
+    }
+}
+
+ServoCommand mapIrCommandToServoCommand(uint16_t irCommand) {
+  switch (irCommand) {
+    case 0x10: return ServoCommand{1, "-", 10};
+    case 0x11: return ServoCommand{1, "+", 10};
+    default: return ServoCommand{0, "", 0};
+  }
+}
+
+// ===================================================================
+//   General function for command processing
+// ===================================================================
+void handleServoCommand(RobotArm &arm, ServoCommand cmd) {
+  uint8_t servoIndex = cmd.servo - 1;
+
+  int angle = arm.angle[servoIndex];
+
+  if (cmd.op == '=') angle = cmd.value;
+  else if (cmd.op == '+') angle = angle + cmd.value;
+  else if (cmd.op == '-') angle = angle - cmd.value;
+
+  angle = clampAngle(angle);
+
+  arm.angle[servoIndex] = angle;
+  arm.updated = true;
+}
+
+void checkAndApplyRobotArmState(RobotArm &arm, SoftwareSerial &bt) {
+  if (arm.updated) {
+    setServoAngles(arm);
+    arm.updated = false;
+    sendRoboArmDataToBluetooth(bt, arm);
+  }
+}
+
+// ===================================================================
+//   SERVO FUNCTIONS
+// ===================================================================
+void setupServoMotors() {
+  int pins[] = SERVO_PINS;
+
+  for (int i = 0; i < 6; i++) {
+    servos[i].attach(pins[i]);
+    robotArm.angle[i] = 90;  // poziție inițială
+    servos[i].write(robotArm.angle[i]);
+  }
+  robotArm.updated = false;
+}
+
+void setServoAngles(RobotArm &arm) {
+  for (int i = 0; i < 6; i++) {
+    servos[i].write(arm.angle[i]);
+  }
 }
